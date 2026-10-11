@@ -51,6 +51,11 @@ def carregar(caminho: str, assinatura: tuple) -> pd.DataFrame:
     df = pontuar_secoes(pd.read_parquet(caminho))
     arqs = arquivos_logs(Path(caminho))
     logs = pd.concat([pd.read_parquet(a) for a in arqs], ignore_index=True) if arqs else None
+    if logs is not None:  # float32 antes da junção reduz o pico de memória do merge
+        num = logs.select_dtypes(["float64", "int64"]).columns
+        logs[num] = logs[num].astype("float32")
+    f64 = df.select_dtypes("float64").columns
+    df[f64] = df[f64].astype("float32")
     df = juntar_horario(df, logs)
     votos = arquivo_votos(Path(caminho))
     if votos is not None:
