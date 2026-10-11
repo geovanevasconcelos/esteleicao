@@ -412,8 +412,8 @@ if secao != TODOS:
     st.stop()
 
 # ---------------------------------------------------------------- abas
-aba_comp, aba_dist, aba_funil, aba_alertas, aba_votos, aba_hora, aba_dig, aba_cruz = st.tabs(
-    ["📊 Comparar", "📈 Distribuição", "🔻 Funil", "🚩 Sinalizadas", "🗳️ Votos × abstenção",
+aba_votos, aba_comp, aba_dist, aba_funil, aba_alertas, aba_hora, aba_dig, aba_cruz = st.tabs(
+    ["🗳️ Votos × abstenção", "📊 Comparar", "📈 Distribuição", "🔻 Funil", "🚩 Sinalizadas",
      "⏰ Horário dos votos", "🖐️ Sem digital", "🔀 Cruzamento"])
 
 if uf == TODOS:
@@ -669,11 +669,8 @@ with aba_votos:
     if "pct_lula" not in df:
         st.info("Sem votos por candidato. Rode `python baixar_votos.py` e recarregue o painel.")
     else:
-        c1, c2 = st.columns([2, 1])
-        modo = c1.radio("Seções com menos abstenção =", ["percentil", "sinalizadas"], index=1, horizontal=True,
-                        format_func={"percentil": "as X% de menor abstenção",
-                                     "sinalizadas": "as sinalizadas por abstenção baixa (critério da barra lateral)"}.get)
-        pct_menor = c2.slider("X%", 1, 25, 5, 1, disabled=modo != "percentil") / 100
+        modo, pct_menor = "sinalizadas", 0.05  # grupo = seções sinalizadas por abstenção baixa (barra lateral)
+        st.caption("Seções com menos abstenção = as sinalizadas por abstenção baixa (critério da barra lateral).")
         comp = st.radio("Comparar cada seção com", ["cidade", "nivel"], horizontal=True,
                         format_func={"cidade": "a média da própria cidade (seção vs. cidade)",
                                      "nivel": "a média geral do nível (seção vs. estado/Brasil)"}.get,
