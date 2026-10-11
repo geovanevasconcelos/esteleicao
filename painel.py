@@ -30,6 +30,22 @@ def arquivo_votos(caminho_secoes: Path) -> Path | None:
     return p if p.exists() else None
 
 
+def desvio_da_cidade(df: pd.DataFrame) -> pd.DataFrame:
+    """Para cada seção, % do candidato menos a média das OUTRAS seções do mesmo município
+    (dif_<cand>_mun, em p.p.) e esse desvio em desvios padrão do município (z_<cand>_mun).
+    Compara a seção com a própria cidade, eliminando diferenças de perfil entre cidades."""
+    g = [df["uf"].astype(str), df["cd_municipio"]]
+    for c in ["pct_lula", "pct_bolsonaro", "pct_outros"]:
+        x = df[c]
+        n = x.groupby(g, observed=True).transform("count")
+        soma = x.groupby(g, observed=True).transform("sum")
+        media_outras = ((soma - x.fillna(0)) / (n - 1)).where(n > 1)
+        df[f"dif_{c[4:]}_mun"] = (x - media_outras).astype("float32")
+        dp = x.groupby(g, observed=True).transform("std").where(n >= 5)
+        df[f"z_{c[4:]}_mun"] = ((x - media_outras) / dp.where(dp > 0.01)).astype("float32")
+    return df
+
+
 @st.cache_data(show_spinner="Carregando e calculando estatísticas…")
 def carregar(caminho: str, _assinatura: tuple) -> pd.DataFrame:
     df = pontuar_secoes(pd.read_parquet(caminho))
@@ -43,6 +59,7 @@ def carregar(caminho: str, _assinatura: tuple) -> pd.DataFrame:
         df["_uf"] = df["uf"].astype(str)
         df = df.merge(v.rename(columns={"uf": "_uf"}), on=["_uf", "cd_municipio", "zona", "secao"],
                       how="left").drop(columns="_uf")
+        df = desvio_da_cidade(df)
     for c in ["uf", "municipio"]:
         df[c] = df[c].astype("category")
     return df
@@ -71,6 +88,10 @@ COLS_VOTOS = {
     "pct_lula": st.column_config.NumberColumn("% Lula", format="percent"),
     "pct_bolsonaro": st.column_config.NumberColumn("% F. Bolsonaro", format="percent"),
     "pct_outros": st.column_config.NumberColumn("% outros/nulos", format="percent"),
+    "dif_lula_mun": st.column_config.NumberColumn("Lula vs. cidade", format="%+.1f p.p.",
+                                                  help="% Lula na seção − média das outras seções do município"),
+    "dif_bolsonaro_mun": st.column_config.NumberColumn("F. Bolsonaro vs. cidade", format="%+.1f p.p.",
+                                                       help="% F. Bolsonaro na seção − média das outras seções do município"),
 }
 EIXO_Z = {
     "Abstenção baixa": "← abstenção mais ALTA · z da abstenção (invertido) · mais BAIXA →",
@@ -489,6 +510,9 @@ with aba_alertas:
     if "pct_apos_17" in sel:
         grav = grav + (sel["pct_apos_17"].fillna(0) / max(lim_17, 1e-9)) * limite
     sel = sel.assign(gravidade=grav).sort_values(["n_criterios", "gravidade"], ascending=False)
+    for c in ["dif_lula_mun", "dif_bolsonaro_mun"]:
+        if c in sel:
+            sel[c] = sel[c] * 100
     k = st.columns(4)
     k[0].metric("🔻 Abstenção baixa", int(df["f_abst"].sum()))
     k[1].metric("⏰ Voto após 17h", int(df["f_17"].sum()) if tem_logs else "—")
@@ -501,7 +525,8 @@ with aba_alertas:
                                  "pôde ser avaliada." if sem_log else ""))
     cols = [c for c in ["uf", "municipio", "zona", "secao", "n_criterios", "criterios_cumpridos",
                         "taxa_abstencao", "taxa_esperada", "z_ajustado",
-                        "pct_lula", "pct_bolsonaro", "pct_outros", "votos_apos_17", "pct_apos_17",
+                        "pct_lula", "pct_bolsonaro", "pct_outros", "dif_lula_mun", "dif_bolsonaro_mun",
+                        "votos_apos_17", "pct_apos_17",
                         "dif_local_min", "votos_manual", "pct_manual_cadastrados", "manual_esperado",
                         "z_manual", "maior_seq_manual", "sinais", "aptos", "nome_local"] if c in sel]
     if medida != "z_ajustado":
@@ -529,6 +554,8 @@ with aba_alertas:
 
 # ---------------------------------------------------------------- votos × abstenção
 VOTOS = [("pct_lula", "Lula"), ("pct_bolsonaro", "F. Bolsonaro"), ("pct_outros", "Outros/nulos")]
+VOTOS_MUN = [("dif_lula_mun", "Lula vs. cidade"), ("dif_bolsonaro_mun", "F. Bolsonaro vs. cidade"),
+             ("dif_outros_mun", "Outros/nulos vs. cidade")]
 GEO_UFS = Path(__file__).parent / "geo" / "brasil_ufs.geojson"
 
 
@@ -552,11 +579,11 @@ def grupo_menor_abstencao(d: pd.DataFrame, modo: str, pct_menor: float, por: lis
     return (taxa <= corte).fillna(False) & ok
 
 
-def comparar_votos(d: pd.DataFrame, grupo: pd.Series, por: list) -> pd.DataFrame:
+def comparar_votos(d: pd.DataFrame, grupo: pd.Series, por: list, votos: list = VOTOS) -> pd.DataFrame:
     """Por unidade: média simples das % de votos de todas as seções vs. das seções do grupo."""
     d = d[d["pct_lula"].notna()]
     grupo = grupo.reindex(d.index).fillna(False)
-    cols = [c for c, _ in VOTOS]
+    cols = [c for c, _ in votos]
     geral = d.groupby(por, observed=True).agg(secoes=("secao", "size"), abst_geral=("taxa_abstencao", "mean"),
                                               **{f"{c}_geral": (c, "mean") for c in cols})
     baixa = d[grupo].groupby(por, observed=True).agg(secoes_baixa=("secao", "size"),
@@ -569,59 +596,71 @@ def comparar_votos(d: pd.DataFrame, grupo: pd.Series, por: list) -> pd.DataFrame
     return tab
 
 
-def barras_geral_vs_baixa(dv: pd.DataFrame, g: pd.DataFrame, titulo: str) -> go.Figure:
+def barras_geral_vs_baixa(dv: pd.DataFrame, g: pd.DataFrame, titulo: str, votos: list = VOTOS) -> go.Figure:
     fig = go.Figure()
+    fmt = "+.1%" if votos is VOTOS_MUN else ".1%"
     for nome, d_, cor in [("todas as seções", dv, COR_NORMAL), ("menor abstenção", g, COR_BAIXA)]:
-        fig.add_trace(go.Bar(name=nome, x=[n for _, n in VOTOS], y=[d_[c].mean() for c, _ in VOTOS],
-                             marker_color=cor, text=[pct(d_[c].mean()) for c, _ in VOTOS],
+        fig.add_trace(go.Bar(name=nome, x=[n for _, n in votos], y=[d_[c].mean() for c, _ in votos],
+                             marker_color=cor, text=[f"{d_[c].mean():{fmt}}" for c, _ in votos],
                              textposition="outside"))
-    fig.update_layout(barmode="group", yaxis_tickformat=".0%", height=360, title=titulo,
+    fig.update_layout(barmode="group", yaxis_tickformat=fmt, height=360, title=titulo,
                       margin=dict(l=10, r=10, t=50, b=10), legend=dict(orientation="h", y=-0.15))
     return fig
 
 
-def config_tabela_votos() -> dict:
+def config_tabela_votos(votos: list = VOTOS) -> dict:
     cfg = {"secoes": st.column_config.NumberColumn("seções", format="%d"),
            "secoes_baixa": st.column_config.NumberColumn("seções menor abst.", format="%d"),
            "abst_geral": st.column_config.NumberColumn("abst. geral", format="percent"),
            "abst_baixa": st.column_config.NumberColumn("abst. do grupo", format="percent")}
-    for c, nome in VOTOS:
-        cfg[f"{c}_geral"] = st.column_config.NumberColumn(f"% {nome} geral", format="percent")
-        cfg[f"{c}_baixa"] = st.column_config.NumberColumn(f"% {nome} menor abst.", format="percent")
+    pref = "" if votos is VOTOS_MUN else "% "
+    for c, nome in votos:
+        cfg[f"{c}_geral"] = st.column_config.NumberColumn(f"{pref}{nome} geral", format="percent")
+        cfg[f"{c}_baixa"] = st.column_config.NumberColumn(f"{pref}{nome} menor abst.", format="percent")
         cfg[f"{c}_dif"] = st.column_config.NumberColumn(f"dif. {nome}", format="percent")
     return cfg
 
 
-def bloco_votos(dv: pd.DataFrame, modo: str, pct_menor: float, titulo: str, filho: list, rotulo: str, key: str):
+def bloco_votos(dv: pd.DataFrame, modo: str, pct_menor: float, titulo: str, filho: list, rotulo: str, key: str,
+                votos: list = VOTOS):
     """Métricas + barras + tabela por subunidade para um recorte `dv`."""
+    cidade = votos is VOTOS_MUN
     grupo = grupo_menor_abstencao(dv, modo, pct_menor)
     g, n_g = dv[grupo], int(grupo.sum())
     if n_g == 0:
         st.warning(f"{titulo}: nenhuma seção no grupo com os filtros atuais.")
         return
-    st.markdown(f"**{titulo}**: média simples das % de votos de cada seção. "
-                f"Grupo de menor abstenção = **{n_g:,}** seções (de {len(dv):,}), "
+    st.markdown(f"**{titulo}**: " + ("média do desvio de cada seção em relação à média da própria cidade "
+                                     "(p.p.; 0 = igual à cidade). " if cidade else
+                                     "média simples das % de votos de cada seção. ")
+                + f"Grupo de menor abstenção = **{n_g:,}** seções (de {len(dv):,}), "
                 f"abstenção média {pct(g['taxa_abstencao'].mean())} "
                 f"vs. {pct(dv['taxa_abstencao'].mean())} no geral.".replace(",", "."))
     k = st.columns(3)
-    for i, (c, nome) in enumerate(VOTOS):
+    for i, (c, nome) in enumerate(votos):
         mg, mb = dv[c].mean(), g[c].mean()
-        k[i].metric(f"% {nome} · menor abstenção", pct(mb),
-                    delta=f"{(mb - mg) * 100:+.1f} p.p. vs. média geral ({pct(mg)})",
-                    help="Diferença em pontos percentuais entre a média das seções do grupo "
-                         "e a média de todas as seções deste nível.")
-    st.plotly_chart(barras_geral_vs_baixa(dv, g, f"{titulo}: todas as seções × menor abstenção"),
+        if cidade:
+            k[i].metric(f"{nome} · menor abstenção", f"{mb * 100:+.1f} p.p.",
+                        delta=f"{(mb - mg) * 100:+.1f} p.p. vs. todas as seções ({mg * 100:+.1f})",
+                        help="Média, nas seções do grupo, de (% na seção − média das outras seções da mesma "
+                             "cidade). Positivo = nessas seções o candidato vai melhor que na própria cidade.")
+        else:
+            k[i].metric(f"% {nome} · menor abstenção", pct(mb),
+                        delta=f"{(mb - mg) * 100:+.1f} p.p. vs. média geral ({pct(mg)})",
+                        help="Diferença em pontos percentuais entre a média das seções do grupo "
+                             "e a média de todas as seções deste nível.")
+    st.plotly_chart(barras_geral_vs_baixa(dv, g, f"{titulo}: todas as seções × menor abstenção", votos),
                     width="stretch", key=f"barras_{key}")
 
     st.markdown(f"**Por {rotulo}**" + (" (no modo percentil, o corte de X% é calculado dentro "
                                          "de cada unidade)" if modo == "percentil" else ""))
-    tab = comparar_votos(dv, grupo_menor_abstencao(dv, modo, pct_menor, por=filho), filho)
+    tab = comparar_votos(dv, grupo_menor_abstencao(dv, modo, pct_menor, por=filho), filho, votos)
     tab[rotulo] = tab[rotulo].astype(str)
     ordem = [rotulo, "secoes", "secoes_baixa", "abst_geral", "abst_baixa"]
-    for c, _ in VOTOS:
+    for c, _ in votos:
         ordem += [f"{c}_geral", f"{c}_baixa", f"{c}_dif"]
-    st.dataframe(tab[ordem].sort_values("pct_lula_dif", ascending=False), hide_index=True,
-                 width="stretch", column_config=config_tabela_votos(), key=f"tab_{key}")
+    st.dataframe(tab[ordem].sort_values(f"{votos[0][0]}_dif", ascending=False), hide_index=True,
+                 width="stretch", column_config=config_tabela_votos(votos), key=f"tab_{key}")
     st.download_button("⬇️ Baixar tabela (CSV)", tab[ordem].to_csv(index=False, sep=";", decimal=",")
                        .encode("utf-8-sig"), f"votos_x_abstencao_{key}.csv", "text/csv", key=f"dl_{key}")
 
@@ -635,23 +674,31 @@ with aba_votos:
                         format_func={"percentil": "as X% de menor abstenção",
                                      "sinalizadas": "as sinalizadas por abstenção baixa (critério da barra lateral)"}.get)
         pct_menor = c2.slider("X%", 1, 25, 5, 1, disabled=modo != "percentil") / 100
+        comp = st.radio("Comparar cada seção com", ["cidade", "nivel"], horizontal=True,
+                        format_func={"cidade": "a média da própria cidade (seção vs. cidade)",
+                                     "nivel": "a média geral do nível (seção vs. estado/Brasil)"}.get,
+                        help="'Própria cidade': % da seção menos a média das outras seções do mesmo município. "
+                             "Elimina diferenças de perfil entre cidades (capital × interior, cidade grande × "
+                             "pequena). 'Nível': compara as % brutas com a média de todas as seções do nível.")
+        votos_ativo = VOTOS_MUN if comp == "cidade" else VOTOS
         dv = df[df["pct_lula"].notna()]
 
         if uf == TODOS:
             # ---------- mapa + gráfico por estado
             st.subheader("Por estado")
-            cand_col, cand_nome = st.selectbox("Candidato", VOTOS, format_func=lambda v: v[1], key="cand_mapa")
-            tab_uf = comparar_votos(dv, grupo_menor_abstencao(dv, modo, pct_menor, por=["uf"]), ["uf"])
+            cand_col, cand_nome = st.selectbox("Candidato", votos_ativo, format_func=lambda v: v[1], key="cand_mapa")
+            tab_uf = comparar_votos(dv, grupo_menor_abstencao(dv, modo, pct_menor, por=["uf"]), ["uf"], votos_ativo)
             tab_uf["uf"] = tab_uf["uf"].astype(str)
             tab_uf = tab_uf[tab_uf["uf"] != "ZZ"]
             lim = float(tab_uf[f"{cand_col}_dif"].abs().max() or 0.01)
             mapa = px.choropleth(
                 tab_uf, geojson=carregar_geo(), locations="uf", featureidkey="id",
-                color=f"{cand_col}_dif", color_continuous_scale="RdBu" if cand_col == "pct_lula" else "RdBu_r",
+                color=f"{cand_col}_dif", color_continuous_scale="RdBu" if "lula" in cand_col else "RdBu_r",
                 range_color=(-lim, lim), hover_name="uf",
-                hover_data={f"{cand_col}_geral": ":.1%", f"{cand_col}_baixa": ":.1%",
+                hover_data={f"{cand_col}_geral": ":+.1%" if comp == "cidade" else ":.1%",
+                            f"{cand_col}_baixa": ":+.1%" if comp == "cidade" else ":.1%",
                             f"{cand_col}_dif": ":+.1%", "secoes_baixa": ":,", "uf": False},
-                labels={f"{cand_col}_geral": f"% {cand_nome} geral", f"{cand_col}_baixa": f"% {cand_nome} menor abst.",
+                labels={f"{cand_col}_geral": f"{cand_nome} geral", f"{cand_col}_baixa": f"{cand_nome} menor abst.",
                         f"{cand_col}_dif": "diferença", "secoes_baixa": "seções no grupo"})
             mapa.update_geos(fitbounds="locations", visible=False, projection_type="mercator")
             mapa.update_traces(marker_line_color="white", marker_line_width=0.8)
@@ -669,8 +716,8 @@ with aba_votos:
                                      marker_color=COR_NORMAL))
                 fig.add_trace(go.Bar(name="menor abstenção", x=tb["uf"], y=tb[f"{cand_col}_baixa"],
                                      marker_color=COR_BAIXA))
-                fig.update_layout(barmode="group", yaxis_tickformat=".0%", height=520,
-                                  title=f"% {cand_nome} por UF (ordenado pela diferença)",
+                fig.update_layout(barmode="group", yaxis_tickformat="+.0%" if comp == "cidade" else ".0%", height=520,
+                                  title=f"{cand_nome} por UF (ordenado pela diferença)",
                                   margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", y=-0.12))
                 st.plotly_chart(fig, width="stretch", key="barras_ufs")
 
@@ -683,15 +730,45 @@ with aba_votos:
             if uf_sel and uf_sel in set(dv["uf"].astype(str)):
                 st.divider()
                 bloco_votos(dv[dv["uf"].astype(str) == uf_sel], modo, pct_menor, f"🗺️ {uf_sel}",
-                            ["cd_municipio", "municipio"], "municipio", key=f"uf_{uf_sel}")
+                            ["cd_municipio", "municipio"], "municipio", key=f"uf_{uf_sel}", votos=votos_ativo)
             else:
                 st.caption("Clique num estado do mapa para ver o detalhe dele (métricas, gráfico e tabela por município).")
             st.divider()
 
-        bloco_votos(dv, modo, pct_menor, nivel, filho, rotulo, key="nivel")
-        st.caption("Leitura: 'dif.' é a média do grupo de menor abstenção menos a média geral, em "
+        bloco_votos(dv, modo, pct_menor, nivel, filho, rotulo, key="nivel", votos=votos_ativo)
+        st.caption("Leitura: 'dif.' é a média do grupo de menor abstenção menos a média de todas as seções, em "
                    "pontos percentuais. Diferenças são esperadas (perfil do eleitorado muda com a "
                    "abstenção); o interesse está em unidades que destoam muito das demais.")
+
+        # ---------- seções que mais destoam da própria cidade
+        st.divider()
+        st.subheader("🔎 Seções de menor abstenção que mais destoam da própria cidade")
+        cc1, cc2, cc3 = st.columns([2, 1, 1])
+        cand_r, nome_r = cc1.selectbox("Candidato", VOTOS[:2], format_func=lambda v: v[1], key="cand_rank")
+        min_sec_mun = cc2.number_input("Cidade com pelo menos N seções", 5, 200, 10, 5, key="min_sec_rank")
+        n_top = cc3.number_input("Mostrar", 10, 500, 50, 10, key="n_rank")
+        zc, dc = f"z_{cand_r[4:]}_mun", f"dif_{cand_r[4:]}_mun"
+        g_all = dv[grupo_menor_abstencao(dv, modo, pct_menor)]
+        n_sec_mun = dv.groupby([dv["uf"].astype(str), dv["cd_municipio"]], observed=True)["secao"].transform("size")
+        g_all = g_all[n_sec_mun.reindex(g_all.index) >= min_sec_mun].copy()
+        g_all["_media_cidade"] = g_all[cand_r] - g_all[dc]
+        rank = g_all.sort_values(zc, ascending=False).head(int(n_top)).copy()
+        rank[dc] = rank[dc] * 100
+        cols_r = ["uf", "municipio", "zona", "secao", "aptos", "taxa_abstencao", "z_ajustado",
+                  cand_r, "_media_cidade", dc, zc, "nome_local"]
+        st.dataframe(rank[cols_r], hide_index=True, width="stretch", height=420, key="tab_rank",
+                     column_config={"taxa_abstencao": st.column_config.NumberColumn("abstenção", format="percent"),
+                                    "z_ajustado": st.column_config.NumberColumn("z abst.", format="%.2f"),
+                                    cand_r: st.column_config.NumberColumn(f"% {nome_r} na seção", format="percent"),
+                                    "_media_cidade": st.column_config.NumberColumn("média da cidade", format="percent"),
+                                    dc: st.column_config.NumberColumn("dif. (p.p.)", format="%+.1f p.p."),
+                                    zc: st.column_config.NumberColumn("z vs. cidade", format="%.2f",
+                                                                      help="Desvios padrão da cidade; ≥ 2 já destoa")})
+        st.download_button("⬇️ Baixar ranking (CSV)", rank[cols_r].to_csv(index=False, sep=";", decimal=",")
+                           .encode("utf-8-sig"), "secoes_vs_cidade.csv", "text/csv", key="dl_rank")
+        st.caption("Só seções do grupo de menor abstenção, em cidades com pelo menos N seções. 'z vs. cidade' = "
+                   "quantos desvios padrão a seção está acima da média das outras seções do município. "
+                   "Use o filtro de Estado/Município na barra lateral para aprofundar.")
 
 # ---------------------------------------------------------------- horário dos votos
 SEM_LOGS = ("Ainda não há logs de urna para este nível. Baixe e processe os logs do(s) estado(s):\n\n"
