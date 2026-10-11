@@ -47,7 +47,7 @@ def desvio_da_cidade(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Carregando e calculando estatísticas…")
-def carregar(caminho: str, _assinatura: tuple) -> pd.DataFrame:
+def carregar(caminho: str, assinatura: tuple) -> pd.DataFrame:
     df = pontuar_secoes(pd.read_parquet(caminho))
     arqs = arquivos_logs(Path(caminho))
     logs = pd.concat([pd.read_parquet(a) for a in arqs], ignore_index=True) if arqs else None
