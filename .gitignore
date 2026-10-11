@@ -1,6 +1,7 @@
 dados/*
 !dados/secoes_*.parquet
 !dados/votos_*.parquet
+!dados/logs_*.parquet
 __pycache__/
 *.pyc
 .venv/
