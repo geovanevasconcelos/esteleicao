@@ -529,6 +529,13 @@ with aba_alertas:
 
 # ---------------------------------------------------------------- votos × abstenção
 VOTOS = [("pct_lula", "Lula"), ("pct_bolsonaro", "F. Bolsonaro"), ("pct_outros", "Outros/nulos")]
+GEO_UFS = Path(__file__).parent / "geo" / "brasil_ufs.geojson"
+
+
+@st.cache_data
+def carregar_geo() -> dict:
+    import json
+    return json.loads(GEO_UFS.read_text(encoding="utf-8"))
 
 
 def grupo_menor_abstencao(d: pd.DataFrame, modo: str, pct_menor: float, por: list | None = None) -> pd.Series:
@@ -562,6 +569,63 @@ def comparar_votos(d: pd.DataFrame, grupo: pd.Series, por: list) -> pd.DataFrame
     return tab
 
 
+def barras_geral_vs_baixa(dv: pd.DataFrame, g: pd.DataFrame, titulo: str) -> go.Figure:
+    fig = go.Figure()
+    for nome, d_, cor in [("todas as seções", dv, COR_NORMAL), ("menor abstenção", g, COR_BAIXA)]:
+        fig.add_trace(go.Bar(name=nome, x=[n for _, n in VOTOS], y=[d_[c].mean() for c, _ in VOTOS],
+                             marker_color=cor, text=[pct(d_[c].mean()) for c, _ in VOTOS],
+                             textposition="outside"))
+    fig.update_layout(barmode="group", yaxis_tickformat=".0%", height=360, title=titulo,
+                      margin=dict(l=10, r=10, t=50, b=10), legend=dict(orientation="h", y=-0.15))
+    return fig
+
+
+def config_tabela_votos() -> dict:
+    cfg = {"secoes": st.column_config.NumberColumn("seções", format="%d"),
+           "secoes_baixa": st.column_config.NumberColumn("seções menor abst.", format="%d"),
+           "abst_geral": st.column_config.NumberColumn("abst. geral", format="percent"),
+           "abst_baixa": st.column_config.NumberColumn("abst. do grupo", format="percent")}
+    for c, nome in VOTOS:
+        cfg[f"{c}_geral"] = st.column_config.NumberColumn(f"% {nome} geral", format="percent")
+        cfg[f"{c}_baixa"] = st.column_config.NumberColumn(f"% {nome} menor abst.", format="percent")
+        cfg[f"{c}_dif"] = st.column_config.NumberColumn(f"dif. {nome}", format="percent")
+    return cfg
+
+
+def bloco_votos(dv: pd.DataFrame, modo: str, pct_menor: float, titulo: str, filho: list, rotulo: str, key: str):
+    """Métricas + barras + tabela por subunidade para um recorte `dv`."""
+    grupo = grupo_menor_abstencao(dv, modo, pct_menor)
+    g, n_g = dv[grupo], int(grupo.sum())
+    if n_g == 0:
+        st.warning(f"{titulo}: nenhuma seção no grupo com os filtros atuais.")
+        return
+    st.markdown(f"**{titulo}**: média simples das % de votos de cada seção. "
+                f"Grupo de menor abstenção = **{n_g:,}** seções (de {len(dv):,}), "
+                f"abstenção média {pct(g['taxa_abstencao'].mean())} "
+                f"vs. {pct(dv['taxa_abstencao'].mean())} no geral.".replace(",", "."))
+    k = st.columns(3)
+    for i, (c, nome) in enumerate(VOTOS):
+        mg, mb = dv[c].mean(), g[c].mean()
+        k[i].metric(f"% {nome} · menor abstenção", pct(mb),
+                    delta=f"{(mb - mg) * 100:+.1f} p.p. vs. média geral ({pct(mg)})",
+                    help="Diferença em pontos percentuais entre a média das seções do grupo "
+                         "e a média de todas as seções deste nível.")
+    st.plotly_chart(barras_geral_vs_baixa(dv, g, f"{titulo}: todas as seções × menor abstenção"),
+                    width="stretch", key=f"barras_{key}")
+
+    st.markdown(f"**Por {rotulo}**" + (" (no modo percentil, o corte de X% é calculado dentro "
+                                         "de cada unidade)" if modo == "percentil" else ""))
+    tab = comparar_votos(dv, grupo_menor_abstencao(dv, modo, pct_menor, por=filho), filho)
+    tab[rotulo] = tab[rotulo].astype(str)
+    ordem = [rotulo, "secoes", "secoes_baixa", "abst_geral", "abst_baixa"]
+    for c, _ in VOTOS:
+        ordem += [f"{c}_geral", f"{c}_baixa", f"{c}_dif"]
+    st.dataframe(tab[ordem].sort_values("pct_lula_dif", ascending=False), hide_index=True,
+                 width="stretch", column_config=config_tabela_votos(), key=f"tab_{key}")
+    st.download_button("⬇️ Baixar tabela (CSV)", tab[ordem].to_csv(index=False, sep=";", decimal=",")
+                       .encode("utf-8-sig"), f"votos_x_abstencao_{key}.csv", "text/csv", key=f"dl_{key}")
+
+
 with aba_votos:
     if "pct_lula" not in df:
         st.info("Sem votos por candidato. Rode `python baixar_votos.py` e recarregue o painel.")
@@ -572,57 +636,62 @@ with aba_votos:
                                      "sinalizadas": "as sinalizadas por abstenção baixa (critério da barra lateral)"}.get)
         pct_menor = c2.slider("X%", 1, 25, 5, 1, disabled=modo != "percentil") / 100
         dv = df[df["pct_lula"].notna()]
-        grupo = grupo_menor_abstencao(dv, modo, pct_menor)
-        g, n_g = dv[grupo], int(grupo.sum())
-        if n_g == 0:
-            st.warning("Nenhuma seção no grupo com os filtros atuais.")
-        else:
-            st.markdown(f"**{nivel}**: média simples das % de votos de cada seção. "
-                        f"Grupo de menor abstenção = **{n_g:,}** seções (de {len(dv):,}), "
-                        f"abstenção média {pct(g['taxa_abstencao'].mean())} "
-                        f"vs. {pct(dv['taxa_abstencao'].mean())} no geral.".replace(",", "."))
-            k = st.columns(3)
-            for i, (c, nome) in enumerate(VOTOS):
-                mg, mb = dv[c].mean(), g[c].mean()
-                k[i].metric(f"% {nome} · menor abstenção", pct(mb),
-                            delta=f"{(mb - mg) * 100:+.1f} p.p. vs. média geral ({pct(mg)})",
-                            help="Diferença em pontos percentuais entre a média das seções do grupo "
-                                 "e a média de todas as seções deste nível.")
-            fig = go.Figure()
-            fig.add_trace(go.Bar(name="todas as seções", x=[n for _, n in VOTOS],
-                                 y=[dv[c].mean() for c, _ in VOTOS], marker_color=COR_NORMAL,
-                                 text=[pct(dv[c].mean()) for c, _ in VOTOS], textposition="outside"))
-            fig.add_trace(go.Bar(name="menor abstenção", x=[n for _, n in VOTOS],
-                                 y=[g[c].mean() for c, _ in VOTOS], marker_color=COR_BAIXA,
-                                 text=[pct(g[c].mean()) for c, _ in VOTOS], textposition="outside"))
-            fig.update_layout(barmode="group", yaxis_tickformat=".0%", height=380,
-                              title="Média das % de votos por seção: todas × menor abstenção",
-                              margin=dict(l=10, r=10, t=50, b=10))
-            st.plotly_chart(fig, width="stretch")
 
-            st.markdown(f"**Por {rotulo}**" + (" (no modo percentil, o corte de X% é calculado dentro "
-                                                 "de cada unidade)" if modo == "percentil" else ""))
-            grupo_u = grupo_menor_abstencao(dv, modo, pct_menor, por=filho)
-            tab = comparar_votos(dv, grupo_u, filho)
-            tab[rotulo] = tab[rotulo].astype(str)
-            ordem = [rotulo, "secoes", "secoes_baixa", "abst_geral", "abst_baixa"]
-            for c, _ in VOTOS:
-                ordem += [f"{c}_geral", f"{c}_baixa", f"{c}_dif"]
-            cfg = {"secoes": st.column_config.NumberColumn("seções", format="%d"),
-                   "secoes_baixa": st.column_config.NumberColumn("seções menor abst.", format="%d"),
-                   "abst_geral": st.column_config.NumberColumn("abst. geral", format="percent"),
-                   "abst_baixa": st.column_config.NumberColumn("abst. do grupo", format="percent")}
-            for c, nome in VOTOS:
-                cfg[f"{c}_geral"] = st.column_config.NumberColumn(f"% {nome} geral", format="percent")
-                cfg[f"{c}_baixa"] = st.column_config.NumberColumn(f"% {nome} menor abst.", format="percent")
-                cfg[f"{c}_dif"] = st.column_config.NumberColumn(f"dif. {nome}", format="percent")
-            st.dataframe(tab[ordem].sort_values("pct_lula_dif", ascending=False), hide_index=True,
-                         width="stretch", column_config=cfg)
-            st.download_button("⬇️ Baixar tabela (CSV)", tab[ordem].to_csv(index=False, sep=";", decimal=",")
-                               .encode("utf-8-sig"), "votos_x_abstencao.csv", "text/csv", key="dl_votos")
-            st.caption("Leitura: 'dif.' é a média do grupo de menor abstenção menos a média geral, em "
-                       "pontos percentuais. Diferenças são esperadas (perfil do eleitorado muda com a "
-                       "abstenção); o interesse está em unidades que destoam muito das demais.")
+        if uf == TODOS:
+            # ---------- mapa + gráfico por estado
+            st.subheader("Por estado")
+            cand_col, cand_nome = st.selectbox("Candidato", VOTOS, format_func=lambda v: v[1], key="cand_mapa")
+            tab_uf = comparar_votos(dv, grupo_menor_abstencao(dv, modo, pct_menor, por=["uf"]), ["uf"])
+            tab_uf["uf"] = tab_uf["uf"].astype(str)
+            tab_uf = tab_uf[tab_uf["uf"] != "ZZ"]
+            lim = float(tab_uf[f"{cand_col}_dif"].abs().max() or 0.01)
+            mapa = px.choropleth(
+                tab_uf, geojson=carregar_geo(), locations="uf", featureidkey="id",
+                color=f"{cand_col}_dif", color_continuous_scale="RdBu" if cand_col == "pct_lula" else "RdBu_r",
+                range_color=(-lim, lim), hover_name="uf",
+                hover_data={f"{cand_col}_geral": ":.1%", f"{cand_col}_baixa": ":.1%",
+                            f"{cand_col}_dif": ":+.1%", "secoes_baixa": ":,", "uf": False},
+                labels={f"{cand_col}_geral": f"% {cand_nome} geral", f"{cand_col}_baixa": f"% {cand_nome} menor abst.",
+                        f"{cand_col}_dif": "diferença", "secoes_baixa": "seções no grupo"})
+            mapa.update_geos(fitbounds="locations", visible=False, projection_type="mercator")
+            mapa.update_traces(marker_line_color="white", marker_line_width=0.8)
+            mapa.update_layout(height=520, margin=dict(l=0, r=0, t=40, b=0),
+                               title=f"Clique num estado · cor = dif. {cand_nome} (menor abst. − geral)",
+                               coloraxis_colorbar=dict(title="dif.", tickformat="+.0%"), dragmode=False)
+            col_mapa, col_bar = st.columns([1, 1])
+            with col_mapa:
+                ev = st.plotly_chart(mapa, width="stretch", on_select="rerun", selection_mode="points",
+                                     key="mapa_ufs")
+            with col_bar:
+                tb = tab_uf.sort_values(f"{cand_col}_dif", ascending=False)
+                fig = go.Figure()
+                fig.add_trace(go.Bar(name="todas as seções", x=tb["uf"], y=tb[f"{cand_col}_geral"],
+                                     marker_color=COR_NORMAL))
+                fig.add_trace(go.Bar(name="menor abstenção", x=tb["uf"], y=tb[f"{cand_col}_baixa"],
+                                     marker_color=COR_BAIXA))
+                fig.update_layout(barmode="group", yaxis_tickformat=".0%", height=520,
+                                  title=f"% {cand_nome} por UF (ordenado pela diferença)",
+                                  margin=dict(l=10, r=10, t=40, b=10), legend=dict(orientation="h", y=-0.12))
+                st.plotly_chart(fig, width="stretch", key="barras_ufs")
+
+            pontos = ev.selection.points if ev and getattr(ev, "selection", None) else []
+            uf_sel = None
+            for p_ in pontos:
+                uf_sel = p_.get("location") or (p_.get("customdata") or [None])[0] or p_.get("hovertext")
+                if uf_sel:
+                    break
+            if uf_sel and uf_sel in set(dv["uf"].astype(str)):
+                st.divider()
+                bloco_votos(dv[dv["uf"].astype(str) == uf_sel], modo, pct_menor, f"🗺️ {uf_sel}",
+                            ["cd_municipio", "municipio"], "municipio", key=f"uf_{uf_sel}")
+            else:
+                st.caption("Clique num estado do mapa para ver o detalhe dele (métricas, gráfico e tabela por município).")
+            st.divider()
+
+        bloco_votos(dv, modo, pct_menor, nivel, filho, rotulo, key="nivel")
+        st.caption("Leitura: 'dif.' é a média do grupo de menor abstenção menos a média geral, em "
+                   "pontos percentuais. Diferenças são esperadas (perfil do eleitorado muda com a "
+                   "abstenção); o interesse está em unidades que destoam muito das demais.")
 
 # ---------------------------------------------------------------- horário dos votos
 SEM_LOGS = ("Ainda não há logs de urna para este nível. Baixe e processe os logs do(s) estado(s):\n\n"
