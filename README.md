@@ -101,6 +101,7 @@ for f in dados/teste_arqurna_*.zip; do python baixar_logs.py --zip $f; done
 - **Comparar**: média ± desvio padrão de cada subunidade (UFs, municípios, zonas ou locais de votação). Com muitos municípios, vira um gráfico média × desvio padrão onde quem destoa do grupo aparece isolado.
 - **Distribuição**: histograma das seções com linhas de média, ±1 e ±2 desvios.
 - **Funil**: abstenção × tamanho da seção, com limites de ±2 e ±3 desvios esperados para cada tamanho.
+- **Votos × abstenção**: média das % de votos (Lula, Flávio Bolsonaro, outros/nulos) das seções com menos abstenção (as X% de menor abstenção ou as sinalizadas) comparada com a média de todas as seções do nível escolhido, com tabela por UF/município/zona e diferença em p.p. Requer `python baixar_votos.py`.
 - **Sinalizadas**: seções que cumprem pelo menos 1, 2 ou os 3 critérios abaixo (escolha na barra lateral), ordenadas pelo número de critérios e pela gravidade; exportável em CSV; clicar numa linha abre o detalhe.
 - **Horário dos votos**: % dos votos em cada hora, hora média por subunidade (média ± desvio), distribuição por seção e lista das seções com mais votos após 17h.
 - **Sem digital**: % de eleitores liberados sem digital hora a hora (separando "sem cadastro" de "liberação manual"), média ± desvio por subunidade, gráfico proporção × tamanho da seção e lista das seções acima do esperado.
