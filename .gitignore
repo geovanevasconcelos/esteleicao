@@ -1,6 +1,8 @@
-dados/
+dados/*
+!dados/secoes_*.parquet
 __pycache__/
 *.pyc
 .venv/
 .DS_Store
 _amostra/
+.st.log
