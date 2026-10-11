@@ -60,6 +60,10 @@ def carregar(caminho: str, assinatura: tuple) -> pd.DataFrame:
         df = df.merge(v.rename(columns={"uf": "_uf"}), on=["_uf", "cd_municipio", "zona", "secao"],
                       how="left").drop(columns="_uf")
         df = desvio_da_cidade(df)
+    # float32 basta para exibição e corta pela metade a memória das ~130 colunas de log,
+    # que ficam vazias nas seções de UFs sem log (importante no Streamlit Cloud, 1 GB).
+    f64 = df.select_dtypes("float64").columns
+    df[f64] = df[f64].astype("float32")
     for c in ["uf", "municipio"]:
         df[c] = df[c].astype("category")
     return df
