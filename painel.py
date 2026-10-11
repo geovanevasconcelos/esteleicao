@@ -205,10 +205,14 @@ def calcular_score(d: pd.DataFrame) -> pd.Series:
     return pd.concat(zs, axis=1).min(axis=1, skipna=False) if zs else pd.Series(np.nan, index=d.index)
 
 
-base = base.assign(z_abst_baixa=-base["z_ajustado"])
-base = base.assign(score_cruzado=calcular_score(base))
-df = df.assign(z_abst_baixa=-df["z_ajustado"])
-df = df.assign(score_cruzado=calcular_score(df))
+# Colunas derivadas são gravadas no próprio DataFrame (sem .assign) para não duplicar
+# as ~150 colunas × 500 mil linhas a cada cópia: cada cópia custa ~350 MB.
+base["z_abst_baixa"] = -base["z_ajustado"]
+base["score_cruzado"] = calcular_score(base)
+if df is not base:
+    df = df.copy()
+    df["z_abst_baixa"] = -df["z_ajustado"]
+    df["score_cruzado"] = calcular_score(df)
 NOME_CRUZ = " + ".join(c.lower() for c in criterios)
 
 def sinalizar(d: pd.DataFrame) -> pd.DataFrame:
@@ -228,9 +232,10 @@ def sinalizar(d: pd.DataFrame) -> pd.DataFrame:
     n = f_abst.astype(int) + f_17.astype(int) + f_man.astype(int)
     rot = (np.where(f_abst, "abstenção baixa · ", "") + np.where(f_17, "voto após 17h · ", "")
            + np.where(f_man, "liberação manual · ", ""))
-    return d.assign(f_abst=f_abst, f_17=f_17, f_man=f_man, n_criterios=n,
-                    criterios_cumpridos=pd.Series(rot, index=d.index).str.rstrip(" · "),
-                    alerta=np.where(n >= min_crit, "sinalizada", "normal"))
+    d["f_abst"], d["f_17"], d["f_man"], d["n_criterios"] = f_abst, f_17, f_man, n
+    d["criterios_cumpridos"] = pd.Series(rot, index=d.index).str.rstrip(" · ")
+    d["alerta"] = np.where(n >= min_crit, "sinalizada", "normal")
+    return d
 
 
 df = sinalizar(df)
@@ -687,7 +692,7 @@ with aba_votos:
                              "Elimina diferenças de perfil entre cidades (capital × interior, cidade grande × "
                              "pequena). 'Nível': compara as % brutas com a média de todas as seções do nível.")
         votos_ativo = VOTOS_MUN if comp == "cidade" else VOTOS
-        dv = df[df["pct_lula"].notna()]
+        dv = df if df["pct_lula"].notna().all() else df[df["pct_lula"].notna()]
 
         if uf == TODOS:
             # ---------- mapa + gráfico por estado
