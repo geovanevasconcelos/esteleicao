@@ -24,12 +24,25 @@ def arquivos_logs(caminho_secoes: Path) -> list[Path]:
     return sorted(PASTA.glob(f"logs_{sufixo}_*.parquet"))
 
 
+def arquivo_votos(caminho_secoes: Path) -> Path | None:
+    """dados/votos_<ano>_t<turno>.parquet (gerado por baixar_votos.py), se existir."""
+    p = PASTA / caminho_secoes.name.replace("secoes_", "votos_")
+    return p if p.exists() else None
+
+
 @st.cache_data(show_spinner="Carregando e calculando estatísticas…")
 def carregar(caminho: str, _assinatura: tuple) -> pd.DataFrame:
     df = pontuar_secoes(pd.read_parquet(caminho))
     arqs = arquivos_logs(Path(caminho))
     logs = pd.concat([pd.read_parquet(a) for a in arqs], ignore_index=True) if arqs else None
     df = juntar_horario(df, logs)
+    votos = arquivo_votos(Path(caminho))
+    if votos is not None:
+        v = pd.read_parquet(votos)
+        v["uf"] = v["uf"].astype(str)
+        df["_uf"] = df["uf"].astype(str)
+        df = df.merge(v.rename(columns={"uf": "_uf"}), on=["_uf", "cd_municipio", "zona", "secao"],
+                      how="left").drop(columns="_uf")
     for c in ["uf", "municipio"]:
         df[c] = df[c].astype("category")
     return df
@@ -54,6 +67,11 @@ CRITERIOS = {
     "Liberação manual alta": ("z_manual", "pct_manual_cadastrados",
                               "% liberados pelo mesário (entre quem tem digital)"),
 }
+COLS_VOTOS = {
+    "pct_lula": st.column_config.NumberColumn("% Lula", format="percent"),
+    "pct_bolsonaro": st.column_config.NumberColumn("% F. Bolsonaro", format="percent"),
+    "pct_outros": st.column_config.NumberColumn("% outros/nulos", format="percent"),
+}
 EIXO_Z = {
     "Abstenção baixa": "← abstenção mais ALTA · z da abstenção (invertido) · mais BAIXA →",
     "Votação tardia": "← votos mais cedo · z da hora média · mais tarde →",
@@ -76,7 +94,8 @@ if not arquivos:
 with st.sidebar:
     st.header("🗳️ Abstenção por seção")
     arquivo = st.selectbox("Eleição / turno", arquivos, format_func=lambda p: p.stem.replace("secoes_", ""))
-    assinatura = tuple((a.name, a.stat().st_mtime) for a in [arquivo, *arquivos_logs(arquivo)])
+    assinatura = tuple((a.name, a.stat().st_mtime)
+                       for a in [arquivo, *arquivos_logs(arquivo), *filter(None, [arquivo_votos(arquivo)])])
     base = carregar(str(arquivo), assinatura)
     tem_logs = bool(base["tem_log"].any())
 
@@ -481,7 +500,8 @@ with aba_alertas:
              "ver o detalhe." + (f" {sem_log:,} delas são de UFs sem logs baixados, onde só a abstenção "
                                  "pôde ser avaliada." if sem_log else ""))
     cols = [c for c in ["uf", "municipio", "zona", "secao", "n_criterios", "criterios_cumpridos",
-                        "taxa_abstencao", "taxa_esperada", "z_ajustado", "votos_apos_17", "pct_apos_17",
+                        "taxa_abstencao", "taxa_esperada", "z_ajustado",
+                        "pct_lula", "pct_bolsonaro", "pct_outros", "votos_apos_17", "pct_apos_17",
                         "dif_local_min", "votos_manual", "pct_manual_cadastrados", "manual_esperado",
                         "z_manual", "maior_seq_manual", "sinais", "aptos", "nome_local"] if c in sel]
     if medida != "z_ajustado":
@@ -494,8 +514,12 @@ with aba_alertas:
                                     "pct_manual_cadastrados", "manual_esperado"]},
                        **{c: st.column_config.NumberColumn(format="%.2f")
                           for c in ["z_ajustado", "z_binomial", "z_simples", "z_manual"]},
+                       **COLS_VOTOS,
                        "dif_local_min": st.column_config.NumberColumn(format="%+.0f min"),
                        "n_criterios": st.column_config.NumberColumn("critérios", format="%d")})
+    if "pct_lula" not in sel:
+        st.caption("Para ver % de votos por candidato (Lula, Flávio Bolsonaro, outros/nulos), rode "
+                   "`python baixar_votos.py` e recarregue.")
     st.download_button("⬇️ Baixar lista (CSV)", sel[cols].to_csv(index=False, sep=";", decimal=",")
                        .encode("utf-8-sig"), "secoes_sinalizadas.csv", "text/csv")
     linhas = evento.selection.rows if evento and evento.selection else []

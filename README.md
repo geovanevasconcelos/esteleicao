@@ -26,6 +26,18 @@ streamlit run painel.py
 
 Nas próximas vezes, basta `source .venv/bin/activate` e `streamlit run painel.py`.
 
+### Votos por candidato (% Lula, % Flávio Bolsonaro, % outros/nulos)
+
+```bash
+python baixar_votos.py
+```
+
+Baixa a "Votação por seção eleitoral" do TSE (≈160 MB, um arquivo para o Brasil)
+e gera `dados/votos_2026_t1.parquet` com a % de votos de cada seção para o nº 13
+(Lula), o nº 22 (Flávio Bolsonaro) e o restante (demais candidatos + brancos +
+nulos). O painel junta esse arquivo automaticamente e mostra as três colunas na
+aba **Sinalizadas** (e no CSV exportado). Aceita `--turno 2` e `--zip arquivo.zip`.
+
 ### Logs de urna (horário dos votos e identificação do eleitor)
 
 ```bash
