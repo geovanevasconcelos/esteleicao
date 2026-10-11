@@ -631,7 +631,7 @@ with aba_votos:
         st.info("Sem votos por candidato. Rode `python baixar_votos.py` e recarregue o painel.")
     else:
         c1, c2 = st.columns([2, 1])
-        modo = c1.radio("Seções com menos abstenção =", ["percentil", "sinalizadas"], horizontal=True,
+        modo = c1.radio("Seções com menos abstenção =", ["percentil", "sinalizadas"], index=1, horizontal=True,
                         format_func={"percentil": "as X% de menor abstenção",
                                      "sinalizadas": "as sinalizadas por abstenção baixa (critério da barra lateral)"}.get)
         pct_menor = c2.slider("X%", 1, 25, 5, 1, disabled=modo != "percentil") / 100
