@@ -46,14 +46,26 @@ def desvio_da_cidade(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner="Carregando e calculando estatísticas…")
-def carregar(caminho: str, assinatura: tuple) -> pd.DataFrame:
+CHAVE = ["uf", "cd_municipio", "zona", "secao"]
+HORARIAS = [f"{p}{h:02d}" for p in "hsm" for h in range(24)]  # votos por hora: total, sem digital, manual
+
+
+@st.cache_resource(show_spinner="Carregando e calculando estatísticas…")
+def carregar(caminho: str, assinatura: tuple) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Retorna (seções com todas as métricas, perfil horário só das seções com log).
+    As 72 colunas horárias ficam fora do DataFrame principal: existem só para ~6% das
+    seções e, espalhadas pelas 500 mil linhas, custavam 150 MB por cópia."""
     df = pontuar_secoes(pd.read_parquet(caminho))
     arqs = arquivos_logs(Path(caminho))
     logs = pd.concat([pd.read_parquet(a) for a in arqs], ignore_index=True) if arqs else None
+    horas = None
     if logs is not None:  # float32 antes da junção reduz o pico de memória do merge
         num = logs.select_dtypes(["float64", "int64"]).columns
         logs[num] = logs[num].astype("float32")
+        horas = logs[CHAVE + ["fuso"] + HORARIAS].copy()
+        horas["uf"] = horas["uf"].astype(str)
+        horas["tem_log"] = True
+        logs = logs.drop(columns=HORARIAS)
     f64 = df.select_dtypes("float64").columns
     df[f64] = df[f64].astype("float32")
     df = juntar_horario(df, logs)
@@ -71,7 +83,7 @@ def carregar(caminho: str, assinatura: tuple) -> pd.DataFrame:
     df[f64] = df[f64].astype("float32")
     for c in ["uf", "municipio"]:
         df[c] = df[c].astype("category")
-    return df
+    return df, horas
 
 
 def pct(x, casas=1):
@@ -121,18 +133,28 @@ if not arquivos:
     st.error("Nenhum dado encontrado. Rode primeiro:  `python baixar_dados.py`")
     st.stop()
 
+def com_horas(x: pd.DataFrame) -> pd.DataFrame:
+    """Seções de `x` que têm log, com as colunas de votos por hora (para perfil_horario / votos_por_hora)."""
+    if HORAS_DF is None:
+        return x.iloc[0:0]
+    k = x[CHAVE].copy()
+    k["uf"] = k["uf"].astype(str)
+    return HORAS_DF.merge(k, on=CHAVE)
+
+
 with st.sidebar:
     st.header("🗳️ Abstenção por seção")
     arquivo = st.selectbox("Eleição / turno", arquivos, format_func=lambda p: p.stem.replace("secoes_", ""))
     assinatura = tuple((a.name, a.stat().st_mtime)
                        for a in [arquivo, *arquivos_logs(arquivo), *filter(None, [arquivo_votos(arquivo)])])
-    base = carregar(str(arquivo), assinatura)
+    base, HORAS_DF = carregar(str(arquivo), assinatura)
     tem_logs = bool(base["tem_log"].any())
 
     st.subheader("Navegação")
     incluir_zz = st.checkbox("Incluir exterior (ZZ)", value=False)
-    if not incluir_zz:
-        base = base[base["uf"] != "ZZ"]
+    # cache_resource devolve o MESMO objeto para todas as sessões (sem pickle, metade da memória);
+    # por isso a página sempre trabalha numa cópia própria, que recebe as colunas derivadas.
+    base = base.copy() if incluir_zz else base[base["uf"] != "ZZ"]
 
     ufs = sorted(base["uf"].unique().tolist())
     uf = st.selectbox("Estado", [TODOS] + ufs)
@@ -356,12 +378,12 @@ def detalhe_secao(s: pd.Series):
         if s.get("sinais"):
             st.warning("**Sinais no log:** " + s["sinais"])
 
-        perfis = {"Esta seção": perfil_horario(linha_df(s))}
+        perfis = {"Esta seção": perfil_horario(com_horas(linha_df(s)))}
         if vizinhas is not None:
             outras = vizinhas[vizinhas["secao"] != s["secao"]]
             if outras["tem_log"].any():
-                perfis["Outras seções da escola"] = perfil_horario(outras)
-        perfis["Município"] = perfil_horario(mun_df)
+                perfis["Outras seções da escola"] = perfil_horario(com_horas(outras))
+        perfis["Município"] = perfil_horario(com_horas(mun_df))
         fig = go.Figure()
         for (nome, p), cor in zip(perfis.items(), [COR_ALTA, "#33415c", COR_NORMAL]):
             p = p[(p.index >= 6) & (p.index <= 23)]
@@ -390,7 +412,7 @@ def detalhe_secao(s: pd.Series):
         k[4].metric("z sem digital / z manual", f"{s['z_sem_digital']:+.1f} / {s['z_manual']:+.1f}"
                     if pd.notna(s["z_sem_digital"]) else "—")
         um = linha_df(s)
-        tot, sd, man = (votos_por_hora(um, p) for p in "hsm")
+        tot, sd, man = (votos_por_hora(com_horas(um), p) for p in "hsm")
         faixa = [h for h in range(6, 24) if tot[h] > 0]
         if faixa:
             horas_ = list(range(min(faixa), max(faixa) + 1))
@@ -791,8 +813,8 @@ with aba_hora:
     if dh.empty:
         st.info(SEM_LOGS)
     else:
-        perfil = perfil_horario(dh)
-        perfil_br = perfil_horario(base)
+        perfil = perfil_horario(com_horas(dh))
+        perfil_br = perfil_horario(com_horas(base))
         perfil, perfil_br = [p[(p.index >= 7) & (p.index <= 23)] for p in (perfil, perfil_br)]
         fig = go.Figure()
         fig.add_trace(go.Bar(x=perfil.index, y=perfil.values, name=nivel,
@@ -889,7 +911,7 @@ with aba_dig:
                                  else ("pct_manual_cadastrados", "z_manual", "manual_esperado"))
 
         # perfil hora a hora
-        tot, sd, man = (votos_por_hora(dd, p) for p in "hsm")
+        tot, sd, man = (votos_por_hora(com_horas(dd), p) for p in "hsm")
         horas_ = [h for h in range(6, 24) if tot[h] >= max(30, 0.001 * tot.sum())]
         fig = go.Figure()
         fig.add_trace(go.Bar(x=[f"{h}h" for h in horas_], y=[(sd[h] - man[h]) / tot[h] for h in horas_],
